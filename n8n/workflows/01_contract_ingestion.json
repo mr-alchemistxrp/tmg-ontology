@@ -1,0 +1,340 @@
+{
+  "name": "01 - Contract Ingestion",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "messageReceived",
+        "pollTimes": {
+          "item": [
+            { "mode": "everyMinute" }
+          ]
+        }
+      },
+      "id": "trigger-outlook",
+      "name": "New Email in Pricing",
+      "type": "n8n-nodes-base.microsoftOutlookTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Microsoft Outlook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if email has attachments and extract metadata\n// n8n Outlook simplified output: from is a string, bodyPreview is the body\nconst email = $input.first().json;\n\n// Handle both simplified (string) and raw (object) from field\nlet fromAddress = '';\nlet fromName = '';\nif (typeof email.from === 'string') {\n  fromAddress = email.from;\n  fromName = email.from.split('@')[0];\n} else if (email.from?.emailAddress) {\n  fromAddress = email.from.emailAddress.address || '';\n  fromName = email.from.emailAddress.name || '';\n}\n\nconst result = {\n  messageId: email.id,\n  subject: email.subject || '',\n  from: fromAddress,\n  fromName: fromName,\n  receivedAt: email.receivedDateTime || new Date().toISOString(),\n  bodyContent: email.bodyPreview || email.body?.content || '',\n  bodyType: 'text',\n  hasAttachments: email.hasAttachments || false,\n  conversationId: email.conversationId || '',\n  internetMessageId: email.internetMessageId || ''\n};\n\nreturn [{ json: result }];"
+      },
+      "id": "extract-email-meta",
+      "name": "Extract Email Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "has-attachments",
+              "leftValue": "={{ $json.hasAttachments }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "check-attachments",
+      "name": "Has Attachments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "getAll",
+        "messageId": "={{ $('Extract Email Metadata').item.json.messageId }}",
+        "returnAll": true
+      },
+      "id": "get-attachments",
+      "name": "Get Attachments",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [660, -100],
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Microsoft Outlook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the Claude API request\n// Combine email body + attachment content for parsing\nconst emailMeta = $('Extract Email Metadata').first().json;\nconst attachments = $input.all().map(item => item.json);\n\n// Build content array for Claude\nconst contentParts = [];\n\n// Add email body context\ncontentParts.push({\n  type: 'text',\n  text: `Email Subject: ${emailMeta.subject}\\nFrom: ${emailMeta.fromName} <${emailMeta.from}>\\nReceived: ${emailMeta.receivedAt}\\n\\nEmail Body:\\n${emailMeta.bodyContent}`\n});\n\n// Add attachment content\nfor (const att of attachments) {\n  if (att.contentBytes) {\n    const mimeType = att.contentType || 'application/octet-stream';\n    const name = att.name || 'attachment';\n    \n    // For PDFs and images, send as base64 document/image\n    if (mimeType === 'application/pdf') {\n      contentParts.push({\n        type: 'document',\n        source: {\n          type: 'base64',\n          media_type: 'application/pdf',\n          data: att.contentBytes\n        }\n      });\n    } else if (mimeType.startsWith('image/')) {\n      contentParts.push({\n        type: 'image',\n        source: {\n          type: 'base64',\n          media_type: mimeType,\n          data: att.contentBytes\n        }\n      });\n    } else {\n      // For XLSX, DOCX, CSV — decode base64 and send as text\n      // n8n will handle the base64 content\n      try {\n        const decoded = Buffer.from(att.contentBytes, 'base64').toString('utf-8');\n        contentParts.push({\n          type: 'text',\n          text: `\\n--- Attachment: ${name} ---\\n${decoded}`\n        });\n      } catch (e) {\n        contentParts.push({\n          type: 'text',\n          text: `\\n--- Attachment: ${name} (binary, could not decode as text) ---`\n        });\n      }\n    }\n  }\n}\n\nreturn [{\n  json: {\n    contentParts,\n    emailMeta\n  }\n}];"
+      },
+      "id": "prep-claude-request",
+      "name": "Prepare Claude Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse email body directly when no attachments\nconst emailMeta = $('Extract Email Metadata').first().json;\n\nconst contentParts = [{\n  type: 'text',\n  text: `Email Subject: ${emailMeta.subject}\\nFrom: ${emailMeta.fromName} <${emailMeta.from}>\\nReceived: ${emailMeta.receivedAt}\\n\\nEmail Body:\\n${emailMeta.bodyContent}`\n}];\n\nreturn [{\n  json: {\n    contentParts,\n    emailMeta\n  }\n}];"
+      },
+      "id": "prep-body-only",
+      "name": "Prepare Body Only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'anthropic/claude-sonnet-4', max_tokens: 8192, messages: [{ role: 'system', content: `You are the rate parsing agent for Transmodal Group, a freight forwarding company based in Etobicoke, Ontario. Your job is to extract structured rate data from carrier contracts (ocean, air, and trucking).\\n\\nGiven a contract document (PDF, XLSX, DOCX, or email body), extract all rate information and return ONLY valid JSON — no markdown, no code fences, no explanation. Extract only what is explicitly stated in the document — never infer or assume values.\\n\\nReturn a JSON object with three keys: source, lanes, and flags.\\n\\nsource object fields: source_type (always \\\"CON\\\"), carrier_name, contract_number, amendment_number (int or null), mode (ocean|air|trucking), scope, term_start (YYYY-MM-DD or null), term_end (YYYY-MM-DD or null), free_time_days (int or null), detention_terms, fsc_methodology, notes.\\n\\nEach lane object: origin_port, origin_country (ISO 2-letter), origin_region, destination_port, destination_country, destination_region, equipment_type (e.g. 20GP, 40HC), commodity_type, base_rate (number), currency (default USD), fsc_method (flat|percentage|indexed|null), fsc_value, fsc_index_source, surcharges (object like {\\\"THC\\\": 250}), transit_days, route_type (direct|transshipment|intermodal|null), free_time_days, valid_from, valid_to, raw_source_excerpt.\\n\\nEach flag object: lane_index (int or null if source-level), field, reason.\\n\\nRules:\\n- One lane per unique origin + destination + equipment type combination\\n- Separate entries for each equipment type\\n- Preserve port names exactly as written\\n- Country codes: ISO 3166-1 alpha-2\\n- Region shorthand: ISC, USEC, USWC, ECNA, SEA, NEA\\n- Extract all named surcharges: THC, ISPS, DOC, PSS, GRI, EBS, LSS, DTHC, CFS\\n- Never guess missing values — use null and add a flag\\n- Do not consolidate lanes that differ by equipment, commodity, or surcharges` }, { role: 'user', content: $json.contentParts }] }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "call-claude",
+      "name": "Claude - Parse Contract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_OPENROUTER_CREDENTIAL_ID",
+          "name": "OpenRouter API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude's response and prepare Supabase inserts\nconst response = $input.first().json;\nconst emailMeta = $('Extract Email Metadata').first().json;\n\n// Extract the text content from OpenRouter response (OpenAI format)\nlet responseText = '';\nif (response.choices && response.choices.length > 0) {\n  responseText = response.choices[0].message?.content || '';\n} else if (response.content && Array.isArray(response.content)) {\n  responseText = response.content.map(c => c.text || '').join('');\n} else if (typeof response.content === 'string') {\n  responseText = response.content;\n}\n\n// Parse the JSON from Claude's response\nlet parsed;\ntry {\n  // Remove any markdown code fences if present\n  const cleaned = responseText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  throw new Error(`Failed to parse Claude response as JSON: ${e.message}\\n\\nResponse: ${responseText.substring(0, 500)}`);\n}\n\nconst source = parsed.source;\nconst lanes = parsed.lanes || [];\nconst flags = parsed.flags || [];\n\n// Compute completeness score for each lane\nconst requiredFields = ['origin_port', 'origin_country', 'destination_port', 'destination_country', 'equipment_type', 'base_rate', 'currency', 'valid_from', 'valid_to'];\nconst optionalFields = ['origin_region', 'destination_region', 'commodity_type', 'fsc_method', 'transit_days', 'route_type', 'free_time_days'];\n\nconst scoredLanes = lanes.map(lane => {\n  const requiredFilled = requiredFields.filter(f => lane[f] != null && lane[f] !== '').length;\n  const optionalFilled = optionalFields.filter(f => lane[f] != null && lane[f] !== '').length;\n  const score = Math.round(((requiredFilled / requiredFields.length) * 0.7 + (optionalFilled / optionalFields.length) * 0.3) * 100) / 100;\n  return { ...lane, completeness_score: score };\n});\n\n// Count flagged lanes\nconst incompleteLanes = scoredLanes.filter(l => l.completeness_score < 0.6);\nconst flaggedLanes = flags.filter(f => f.lane_index !== null);\n\n// Track Claude usage\nconst usage = {\n  model: response.model || 'anthropic/claude-sonnet-4',\n  input_tokens: response.usage?.prompt_tokens || 0,\n  output_tokens: response.usage?.completion_tokens || 0\n};\n\nreturn [{\n  json: {\n    source,\n    lanes: scoredLanes,\n    flags,\n    incompleteLanes,\n    emailMeta,\n    usage,\n    laneCount: scoredLanes.length,\n    flagCount: flags.length\n  }\n}];"
+      },
+      "id": "parse-response",
+      "name": "Parse Claude Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rate_sources",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source_type: $json.source.source_type, carrier_name: $json.source.carrier_name, contract_number: $json.source.contract_number, amendment_number: $json.source.amendment_number, mode: $json.source.mode, scope: $json.source.scope, term_start: $json.source.term_start, term_end: $json.source.term_end, free_time_days: $json.source.free_time_days, detention_terms: $json.source.detention_terms, fsc_methodology: $json.source.fsc_methodology, notes: $json.source.notes }) }}"
+      },
+      "id": "insert-rate-source",
+      "name": "Insert Rate Source",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_SUPABASE_CREDENTIAL_ID",
+          "name": "Supabase Service Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the source ID from Supabase response and prepare lane inserts\nconst supabaseResponse = $input.first().json;\nconst sourceId = Array.isArray(supabaseResponse) ? supabaseResponse[0].id : supabaseResponse.id;\nconst parseData = $('Parse Claude Response').first().json;\n\n// Map each lane to a Supabase insert\nconst laneInserts = parseData.lanes.map(lane => ({\n  source_id: sourceId,\n  mode: parseData.source.mode,\n  origin_port: lane.origin_port,\n  origin_country: lane.origin_country,\n  origin_region: lane.origin_region,\n  destination_port: lane.destination_port,\n  destination_country: lane.destination_country,\n  destination_region: lane.destination_region,\n  equipment_type: lane.equipment_type,\n  commodity_type: lane.commodity_type,\n  base_rate: lane.base_rate,\n  currency: lane.currency || 'USD',\n  fsc_method: lane.fsc_method,\n  fsc_value: lane.fsc_value,\n  fsc_index_source: lane.fsc_index_source,\n  surcharges: lane.surcharges || {},\n  transit_days: lane.transit_days,\n  route_type: lane.route_type,\n  free_time_days: lane.free_time_days,\n  valid_from: lane.valid_from || parseData.source.term_start,\n  valid_to: lane.valid_to || parseData.source.term_end,\n  validity_status: 'current',\n  completeness_score: lane.completeness_score,\n  raw_source_excerpt: lane.raw_source_excerpt\n}));\n\nreturn [{\n  json: {\n    sourceId,\n    laneInserts,\n    parseData\n  }\n}];"
+      },
+      "id": "prep-lane-inserts",
+      "name": "Prepare Lane Inserts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rates",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.laneInserts) }}"
+      },
+      "id": "insert-rates",
+      "name": "Insert Rates (Bulk)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_SUPABASE_CREDENTIAL_ID",
+          "name": "Supabase Service Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build confirmation email body\nconst parseData = $('Parse Claude Response').first().json;\nconst source = parseData.source;\nconst sourceId = $('Prepare Lane Inserts').first().json.sourceId;\nconst lanes = parseData.lanes;\nconst flags = parseData.flags;\nconst emailMeta = parseData.emailMeta;\n\n// Build equipment type summary\nconst equipTypes = [...new Set(lanes.map(l => l.equipment_type).filter(Boolean))];\n\n// Build incomplete lanes list\nconst incompleteLanes = lanes\n  .map((l, i) => ({ ...l, index: i }))\n  .filter(l => l.completeness_score < 0.6);\n\nlet body = `Filed to rate library:\\n`;\nbody += `  Source: ${source.carrier_name || 'Unknown'}`;\nif (source.contract_number) body += ` Contract ${source.contract_number}`;\nif (source.amendment_number) body += `, Amendment ${source.amendment_number}`;\nbody += `\\n`;\nbody += `  Mode: ${(source.mode || 'unknown').charAt(0).toUpperCase() + (source.mode || 'unknown').slice(1)}\\n`;\nif (source.term_start || source.term_end) {\n  body += `  Term: ${source.term_start || '?'} - ${source.term_end || '?'}\\n`;\n}\nbody += `  Lanes captured: ${lanes.length}\\n`;\nif (equipTypes.length) body += `  Equipment types: ${equipTypes.join(', ')}\\n`;\nif (source.free_time_days) body += `  Free time: ${source.free_time_days} days\\n`;\nif (source.fsc_methodology) body += `  FSC methodology: ${source.fsc_methodology}\\n`;\nbody += `\\n`;\nbody += `Source ID: ${sourceId}\\n`;\n\nif (incompleteLanes.length > 0) {\n  body += `\\n${incompleteLanes.length} lane(s) flagged incomplete:\\n`;\n  for (const l of incompleteLanes) {\n    body += `  - ${l.origin_port || '?'} -> ${l.destination_port || '?'}, ${l.equipment_type || '?'}\\n`;\n  }\n}\n\nif (flags.length > 0) {\n  body += `\\n${flags.length} flag(s):\\n`;\n  for (const f of flags) {\n    body += `  - ${f.field}: ${f.reason}\\n`;\n  }\n}\n\nbody += `\\nReply to this thread if corrections are needed.`;\n\n// Build subject line\nlet subject = `Re: ${emailMeta.subject}`;\nif (!subject.toLowerCase().includes('rate')) {\n  subject = `Re: ${emailMeta.subject} - Rates Filed`;\n}\n\nreturn [{\n  json: {\n    subject,\n    body,\n    replyTo: emailMeta.from,\n    messageId: emailMeta.messageId,\n    sourceId,\n    parseData\n  }\n}];"
+      },
+      "id": "build-confirmation",
+      "name": "Build Confirmation Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 0]
+    },
+    {
+      "parameters": {
+        "operation": "reply",
+        "messageId": "={{ $json.messageId }}",
+        "bodyContent": "={{ $json.body }}",
+        "additionalFields": {}
+      },
+      "id": "send-reply",
+      "name": "Send Confirmation Reply",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [2420, 0],
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Microsoft Outlook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/activity_log",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ actor: 'agent', actor_email: 'pricing@transmodalgroup.com', action_type: 'rate_ingested', target_table: 'rate_sources', target_id: $json.sourceId, email_thread_id: $json.parseData.emailMeta.conversationId, model_used: $json.parseData.usage.model, tokens_used: ($json.parseData.usage.input_tokens || 0) + ($json.parseData.usage.output_tokens || 0), cost_usd: null, metadata: { lanes_count: $json.parseData.laneCount, flags_count: $json.parseData.flagCount, subject: $json.parseData.emailMeta.subject, from: $json.parseData.emailMeta.from } }) }}"
+      },
+      "id": "log-activity",
+      "name": "Log to Activity Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_SUPABASE_CREDENTIAL_ID",
+          "name": "Supabase Service Key"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New Email in Pricing": {
+      "main": [
+        [{ "node": "Extract Email Metadata", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Email Metadata": {
+      "main": [
+        [{ "node": "Has Attachments?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Attachments?": {
+      "main": [
+        [{ "node": "Get Attachments", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Body Only", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Attachments": {
+      "main": [
+        [{ "node": "Prepare Claude Request", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Claude Request": {
+      "main": [
+        [{ "node": "Claude - Parse Contract", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Body Only": {
+      "main": [
+        [{ "node": "Claude - Parse Contract", "type": "main", "index": 0 }]
+      ]
+    },
+    "Claude - Parse Contract": {
+      "main": [
+        [{ "node": "Parse Claude Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Claude Response": {
+      "main": [
+        [{ "node": "Insert Rate Source", "type": "main", "index": 0 }]
+      ]
+    },
+    "Insert Rate Source": {
+      "main": [
+        [{ "node": "Prepare Lane Inserts", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Lane Inserts": {
+      "main": [
+        [{ "node": "Insert Rates (Bulk)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Insert Rates (Bulk)": {
+      "main": [
+        [{ "node": "Build Confirmation Email", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Confirmation Email": {
+      "main": [
+        [{ "node": "Send Confirmation Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Confirmation Reply": {
+      "main": [
+        [{ "node": "Log to Activity Log", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1
+}
